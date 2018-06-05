@@ -1,0 +1,29 @@
+#
+# Copyright (c) 2018 Intel Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+config CMSIS_V2_IPC
+        bool
+        prompt "CMSIS API"
+        default n
+        help
+          This enables CMSIS API support.
+
+if CMSIS_V2_IPC
+config MAX_CMSIS_THREAD_COUNT
+	int
+	prompt "Maximum thread count in CMSIS application"
+	default 5
+	range 0 255
+	help
+	  Mention maximum number of threads in CMSIS compliant application.
+
+config NUM_COOP_PRIORITIES
+        int
+        default 0
+
+config NUM_PREEMPT_PRIORITIES
+	int
+	default 56
+endif
