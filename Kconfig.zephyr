@@ -306,6 +306,13 @@ config BUILD_OUTPUT_STRIPPED
 	  Build a stripped binary. This will build a zephyr.stripped file need
 	  by some platforms.
 
+config BUILD_BOARD_IMAGE
+	bool "Build a board-specific image"
+	help
+	  Build a board specific binary. This may differ from board to board
+	  but may generally involve padding the output binary with some
+	  additional data.
+
 config APPLICATION_DEFINED_SYSCALL
 	bool "Scan application folder for any syscall definition"
 	help
