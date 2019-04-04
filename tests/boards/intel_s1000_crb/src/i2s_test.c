@@ -48,8 +48,12 @@ extern struct k_sem thread_sem;
 #define FRAMES_PER_ITERATION	50
 #define TIMEOUT			2000
 
+#if 0
 static char __aligned(4) audio_buffers[BLOCK_SIZE_BYTES * NUM_I2S_BUFFERS];
 static struct k_mem_slab i2s_mem_slab;
+#else
+K_MEM_SLAB_DEFINE(i2s_mem_slab, BLOCK_SIZE_BYTES, NUM_I2S_BUFFERS, 4);
+#endif
 
 /** Configure I2S bidirectional transfer. */
 void test_i2s_bidirectional_transfer_configure(void)
@@ -58,9 +62,14 @@ void test_i2s_bidirectional_transfer_configure(void)
 	struct device *dev_i2s;
 	struct i2s_config i2s_cfg;
 
-	k_mem_slab_init(&i2s_mem_slab, audio_buffers, BLOCK_SIZE_BYTES,
-			NUM_I2S_BUFFERS);
-
+	//k_mem_slab_init(&i2s_mem_slab, audio_buffers, BLOCK_SIZE_BYTES,
+	//		NUM_I2S_BUFFERS);
+#if 0
+	if (i2s_mem_slab.num_used == 0)
+		printk("num_used is 0\n");
+	if (i2s_mem_slab.num_blocks - i2s_mem_slab.num_used == NUM_I2S_BUFFERS)
+		printk("num_free is %d\n", NUM_I2S_BUFFERS);
+#endif
 	dev_i2s = device_get_binding(I2S_DEV_NAME);
 	if (!dev_i2s) {
 		printk("I2S: Device driver not found.\n");
@@ -182,4 +191,5 @@ void i2s_thread(void *dummy1, void *dummy2, void *dummy3)
 }
 
 K_THREAD_DEFINE(i2s_thread_id, STACKSIZE, i2s_thread, NULL, NULL, NULL,
-		PRIORITY, 0, K_NO_WAIT);
+		//PRIORITY, 0, K_NO_WAIT);
+		PRIORITY, 0, K_MSEC(100));
