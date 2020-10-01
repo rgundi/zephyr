@@ -22,6 +22,9 @@
 /* 25 us */
 #define MAX_CLK_STRETCHING  5
 
+uint8_t s_port_sel;
+uint32_t speed_id;
+
 struct xec_speed_cfg {
 	uint32_t bus_clk;
 	uint32_t data_timing;
@@ -69,6 +72,55 @@ static const struct xec_speed_cfg xec_cfg_params[] = {
 	},
 };
 
+static void i2c_xec_reconfig(uint32_t ba)
+{
+	uint32_t cfg;
+	uint8_t ctrl;
+
+	/* Assert RESET and clr others */
+	cfg = MCHP_I2C_SMB_CFG_RESET;
+	MCHP_I2C_SMB_CFG(ba) = cfg;
+
+	k_busy_wait(20);
+
+	/* Bus reset */
+	cfg &= ~MCHP_I2C_SMB_CFG_RESET;
+	MCHP_I2C_SMB_CFG(ba) = cfg;
+
+	/* Write 0x80. i.e Assert PIN bit, ESO = 0 and Interrupts
+	 * disabled (ENI)
+	 */
+	ctrl = MCHP_I2C_SMB_CTRL_PIN;
+	MCHP_I2C_SMB_CTRL_WO(ba) = ctrl;
+
+	/* Set own address */
+	MCHP_I2C_SMB_OWN_ADDR(ba) = 0x7F;
+
+	/* Configure speed */
+	MCHP_I2C_SMB_BUS_CLK(ba) = xec_cfg_params[speed_id].bus_clk;
+
+	ctrl |= (MCHP_I2C_SMB_CTRL_PIN | MCHP_I2C_SMB_CTRL_ESO |
+		 MCHP_I2C_SMB_CTRL_ACK);
+	MCHP_I2C_SMB_CTRL_WO(ba) = ctrl;
+
+	/* Port selection */
+	cfg |= (s_port_sel & MCHP_I2C_SMB_CFG_PORT_SEL_MASK);
+	MCHP_I2C_SMB_CFG(ba) = cfg;
+
+	/* Configure Data Timing register, Repeated Start Hold Time register,
+	 * and Timeout Scaling register
+	 */
+	MCHP_I2C_SMB_DATA_TM(ba) = xec_cfg_params[speed_id].data_timing;
+	MCHP_I2C_SMB_RSHT(ba) = xec_cfg_params[speed_id].start_hold_time;
+	MCHP_I2C_SMB_TMTSC(ba) = xec_cfg_params[speed_id].timeout_scale;
+
+	/* Enable controller and I2C filters*/
+	cfg |= MCHP_I2C_SMB_CFG_ENAB;
+	MCHP_I2C_SMB_CFG(ba) = cfg;
+
+	k_busy_wait(20);
+}
+
 static int xec_spin_yield(int *counter)
 {
 	*counter = *counter + 1;
@@ -88,10 +140,15 @@ static int xec_spin_yield(int *counter)
 
 static void recover_from_error(uint32_t ba)
 {
-	MCHP_I2C_SMB_CTRL_WO(ba) = MCHP_I2C_SMB_CTRL_PIN |
-				   MCHP_I2C_SMB_CTRL_ESO |
-				   MCHP_I2C_SMB_CTRL_STO |
-				   MCHP_I2C_SMB_CTRL_ACK;
+	printk("Before recovery\n");
+	printk("MCHP_I2C_SMB_CMPL(ba)= 0x%X\n", MCHP_I2C_SMB_CMPL(ba));
+	printk("MCHP_I2C_SMB_STS_RO(ba)= 0x%X\n", MCHP_I2C_SMB_STS_RO(ba));
+
+	i2c_xec_reconfig(ba);
+
+	printk("After recovery\n");
+	printk("MCHP_I2C_SMB_CMPL(ba)= 0x%X\n", MCHP_I2C_SMB_CMPL(ba));
+	printk("MCHP_I2C_SMB_STS_RO(ba)= 0x%X\n", MCHP_I2C_SMB_STS_RO(ba));
 }
 
 static int wait_bus_free(uint32_t ba)
@@ -103,6 +160,7 @@ static int wait_bus_free(uint32_t ba)
 		ret = xec_spin_yield(&counter);
 
 		if (ret < 0) {
+			printk("%s: ret = %d\n", __func__,ret);
 			return ret;
 		}
 	}
@@ -120,19 +178,24 @@ static int wait_completion(uint32_t ba)
 		ret = xec_spin_yield(&counter);
 
 		if (ret < 0) {
-			recover_from_error(ba);
-			return ret;
+			if (MCHP_I2C_SMB_STS_RO(ba) & MCHP_I2C_SMB_STS_PIN) {
+				printk("%s: ret = %d\n", __func__,ret);
+				recover_from_error(ba);
+				return ret;
+			}
 		}
 	}
 
 	/* Check if Slave send ACK/NACK */
 	if (MCHP_I2C_SMB_STS_RO(ba) & MCHP_I2C_SMB_STS_LRB_AD0) {
+		printk("%s: ret = EIO\n", __func__);
 		recover_from_error(ba);
 		return -EIO;
 	}
 
 	/* Check for bus error */
 	if (MCHP_I2C_SMB_STS_RO(ba) & MCHP_I2C_SMB_STS_BER) {
+		printk("%s: ret = EBUSY\n", __func__);
 		recover_from_error(ba);
 		return -EBUSY;
 	}
@@ -152,10 +215,8 @@ static int i2c_xec_configure(const struct device *dev,
 	const struct i2c_xec_config *config =
 		(const struct i2c_xec_config *const) (dev->config);
 	uint32_t ba = config->base_addr;
-	uint8_t port_sel = config->port_sel;
-	uint32_t speed_id;
-	uint32_t cfg, bb_ctrl;
-	uint8_t ctrl;
+
+	s_port_sel = config->port_sel;
 
 	if (!(dev_config_raw & I2C_MODE_MASTER)) {
 		return -ENOTSUP;
@@ -179,49 +240,7 @@ static int i2c_xec_configure(const struct device *dev,
 		return -EINVAL;
 	}
 
-	cfg = MCHP_I2C_SMB_CFG(ba) & MCHP_I2C_SMB_CTRL_MASK;
-	bb_ctrl = MCHP_I2C_SMB_BB_CTRL(ba) & MCHP_I2C_SMB_BB_MASK;
-	ctrl = MCHP_I2C_SMB_CTRL(ba) & MCHP_I2C_SMB_CTRL_MASK;
-
-	/* Assert RESET and clr others */
-	cfg |= MCHP_I2C_SMB_CFG_RESET;
-	MCHP_I2C_SMB_CFG(ba) = cfg;
-
-	/* Enable bit-bang mode, do not enable SMBus HW timeouts */
-	bb_ctrl |= MCHP_I2C_SMB_BB_EN;
-	bb_ctrl |= MCHP_I2C_SMB_BB_SCL_DIR_OUT;
-	bb_ctrl |= MCHP_I2C_SMB_BB_SDA_DIR_OUT;
-	bb_ctrl |= (MCHP_I2C_SMB_BB_CL | MCHP_I2C_SMB_BB_DAT);
-	MCHP_I2C_SMB_BB_CTRL(ba) = bb_ctrl;
-
-	/* Bus reset */
-	cfg &= ~MCHP_I2C_SMB_CFG_RESET;
-	MCHP_I2C_SMB_CFG(ba) = cfg;
-
-	/* Assert PIN bit, ESO = 0 and disables Interrupts (ENI) */
-	ctrl =  MCHP_I2C_SMB_CTRL_PIN;
-	MCHP_I2C_SMB_CTRL_WO(ba) = ctrl;
-
-	/* Port selection */
-	cfg |= (port_sel & MCHP_I2C_SMB_CFG_PORT_SEL_MASK);
-	MCHP_I2C_SMB_CFG(ba) = cfg;
-
-	/* Enable controller and I2C filters*/
-	cfg |= (MCHP_I2C_SMB_CFG_ENAB | MCHP_I2C_SMB_CFG_FEN);
-	MCHP_I2C_SMB_CFG(ba) = cfg;
-
-	/* Set own address */
-	MCHP_I2C_SMB_OWN_ADDR(ba) = 0x7F;
-
-	/* Configure speed */
-	MCHP_I2C_SMB_BUS_CLK(ba) = xec_cfg_params[speed_id].bus_clk;
-	MCHP_I2C_SMB_DATA_TM(ba) = xec_cfg_params[speed_id].data_timing;
-	MCHP_I2C_SMB_RSHT(ba) = xec_cfg_params[speed_id].start_hold_time;
-	MCHP_I2C_SMB_TMTSC(ba) = xec_cfg_params[speed_id].timeout_scale;
-
-	ctrl |= (MCHP_I2C_SMB_CTRL_PIN | MCHP_I2C_SMB_CTRL_ESO |
-		 MCHP_I2C_SMB_CTRL_ENI | MCHP_I2C_SMB_CTRL_ACK);
-	MCHP_I2C_SMB_CTRL_WO(ba) = ctrl;
+	i2c_xec_reconfig(ba);
 
 	return 0;
 }
@@ -258,6 +277,7 @@ static int i2c_xec_poll_write(const struct device *dev, struct i2c_msg msg,
 
 		ret = wait_completion(ba);
 		if (ret) {
+			printk("%s: ret1 = %d\n", __func__,ret);
 			return ret;
 		}
 	}
@@ -267,6 +287,7 @@ static int i2c_xec_poll_write(const struct device *dev, struct i2c_msg msg,
 		MCHP_I2C_SMB_DATA(ba) = msg.buf[i];
 		ret = wait_completion(ba);
 		if (ret) {
+			printk("%s: ret2 = %d\n", __func__,ret);
 			return ret;
 		}
 
@@ -324,6 +345,7 @@ static int i2c_xec_poll_read(const struct device *dev, struct i2c_msg msg,
 
 	ret = wait_completion(ba);
 	if (ret) {
+		printk("%s: ret1 = %d\n", __func__,ret);
 		return ret;
 	}
 
@@ -336,6 +358,7 @@ static int i2c_xec_poll_read(const struct device *dev, struct i2c_msg msg,
 	byte = MCHP_I2C_SMB_DATA(ba);
 	ret = wait_completion(ba);
 	if (ret) {
+		printk("%s: ret2 = %d\n", __func__,ret);
 		return ret;
 	}
 
